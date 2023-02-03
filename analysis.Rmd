@@ -1,0 +1,157 @@
+---
+title: "Comparing actxps and ExperienceAnalysis.jl"
+output:
+  html_document:
+    df_print: paged
+---
+
+We do a comparison of exposures created by actxps (an R package) and ExperienceAnalysis.jl (a Julia package).
+
+```{r, message=FALSE}
+library(actxps)
+library(readr)
+library(magrittr)
+library(dplyr)
+library(lubridate)
+```
+
+## Different row counts
+
+```{r, message=FALSE}
+census_dat <- read_csv("census_dat.csv")
+r_df <- expose_py(
+  census_dat,
+  start_date = "2006-6-15",
+  end_date = "2020-02-29",
+  target_status = "Surrender"
+) %>% select(pol_num, pol_date_yr, term_date, exposure, status)
+jl_df <- read_csv("df_jl.csv") # from create_csv.jl
+```
+
+ExperienceAnalysis.jl creates 1887 more rows of exposures. We want to understand why.
+
+```{r}
+print(paste("row count Julia", nrow(jl_df)))
+print(paste("row count R", nrow(r_df)))
+print(paste("difference", nrow(jl_df)-nrow(r_df)))
+```
+
+## R left join Julia
+
+We can use left joins to find rows from R that have no match in Julia.
+
+```{r}
+r_julia <- r_df %>% left_join(jl_df, c("pol_num", "pol_date_yr" = "from"))
+```
+
+### ExperienceAnalysis.jl generates duplicate exposures {#jl-dup}
+
+The warning above lets us know that there are multiple matches, indicating duplicate (`policy_num`, `from`) combinations from ExperienceAnalysis.jl. We see that ExperienceAnalysis.jl generates three rows with no `exposure_fraction`.
+
+```{r}
+jl_df %>%
+  group_by(pol_num, from) %>%
+  mutate(pol_from_count=n()) %>%
+  filter(pol_from_count > 1)
+```
+
+### Inspect rows with no match
+
+Rows from actxps that have no match in ExperienceAnalysis.jl follow these patterns:
+
+* If `term_date` is defined, `term_date == pol_date_yr`
+* If `term_date` is not defined
+  * `pol_date_yr` falls on a leap day (xxxx-02-29) or
+  * `pol_date_yr` falls on 2020-03-01
+
+```{r}
+r_julia %>% filter(is.na(exposure_fraction))
+```
+
+### `term_date` defined, `term_date == pol_date_yr` {#term-is-anniv}
+
+ExperienceAnalysis.jl appears to treat date intervals with a non-inclusive right boundary, [issue_date, termination_date). actxps appear to have an inclusive right boundary.
+
+```{r}
+r_julia %>% filter(pol_num %in% c(640, 1523))
+```
+
+According to section 4.3 of the Society of Actuaries (SOA) [experience study document](https://www.soa.org/49378a/globalassets/assets/files/research/experience-study-calculations.pdf), both of these approaches are wrong some of the time.
+
+> For a lapse on a policy anniversary, using 11:59 pm on the day
+before the anniversary assures that the lapse is allocated to the proper policy year. The date assumption may need
+to be adjusted for certain events under study. For example, a death on the policy anniversary would be incorrectly
+assigned to the prior policy year by using 11:59 on the day before. Deaths should therefore be assumed to occur at
+11:59 pm on the date of death, not the prior day.
+
+ExperienceAnalysis.jl is not correct on `pol_num` 640 because it does not create an exposure interval containing the day 2014-11-02. actxps is not correct on `pol_num` 1523 because it assigns the lapse to the day 2019-09-30 instead of 2019-09-29.
+
+### `term_date` not defined, `pol_date_yr` falls on a leap day (`xxxx-02-29`) {#leap}
+
+actxps does not create exposures properly for policies issued on leap day.
+
+```{r}
+r_df %>% filter(pol_num == 10465)
+```
+ExperienceAnalysis.jl appears to not assign some dates to the correct interval. The fifth row should start on 2012-02-29.
+
+```{r}
+jl_df %>% filter(pol_num == 10465)
+```
+
+### `term_date` not defined, `pol_date_yr` falls on 2020-03-01 {#right-trunc}
+
+The end date of the study is 2020-02-29, so this should not happen. I am unsure if this is related to having an end date that falls on a leap year.
+
+```{r}
+r_julia %>% filter(pol_num %in% c(2830,2877,1397,4621))
+```
+
+## Julia left join R
+
+We do the same inspection of rows with no match.
+
+```{r}
+julia_r <- jl_df %>% left_join(r_df, c("pol_num", "from" = "pol_date_yr"))
+julia_r %>% filter(is.na(exposure))
+```
+
+The rows in Julia that are not in R all have `from` as 2006-06-15 or xxxx-02-28.
+
+```{r}
+julia_r %>%
+  filter(is.na(exposure)) %>%
+  group_by(from) %>%
+  summarise(count=n())
+```
+
+Rows of the form xxxx-02-28 are explained in the [previous section](#leap) on leap days.
+
+### `from` is 2006-06-15 {#left-trunc}
+
+Policy 4120 was issued on date 2005-05-27. The start date of the study truncates the interval [2006-05-27, 2007-05-27) to [2006-06-15,	2007-05-27). This appears to work as expected in ExperienceAnalysis.jl.
+
+```{r}
+jl_df %>% filter(pol_num == 4120)
+```
+
+actxps appears to not create partial exposure intervals that begin at the start date of the study.
+
+```{r}
+r_df %>% filter(pol_num == 4120)
+```
+
+## Review
+
+The following issues will be made on GitHub:
+
+* ExperienceAnalysis.jl
+  * Creation of empty exposures, [link](#jl-dup)
+  * Handling of deaths that occur on policy anniversaries, [link](#term-is-anniv)
+  * Leap day bug is cause by the following: (((Leap Day + Year) + Year) + Year) + Year != Leap Day + 4 Years. Change way that starting interval dates are created. [link](#leap)
+* actxps
+  * Handling of surrenders that occur on policy anniversaries, [link](#term-is-anniv)
+  * Create partial exposure intervals that begin at the start date of the study, [link](#left-trunc)
+  * Exposure intervals created past study end, [link](#right-trunc)
+  * Policies issued on leap year do not create exposures on non-leap years, [link](#leap)
+  

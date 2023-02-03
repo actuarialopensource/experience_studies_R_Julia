@@ -1,0 +1,9 @@
+[deps]
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DayCounts = "44e31299-2c53-5a9b-9141-82aa45d7972f"
+ExperienceAnalysis = "51cd30ab-a913-41ff-9b6f-9b78880a2ac2"
+MortalityTables = "4780e19d-04b9-53dc-86c2-9e9aa59b5a12"
+Parsers = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
+
+[compat]
+Parsers = "2.2.4"
